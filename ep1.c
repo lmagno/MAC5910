@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <ctype.h>
 #include <netdb.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -49,11 +50,36 @@ typedef enum {CAPABILITY, NOOP, LOGOUT,
               STARTTLS, AUTHENTICATE, LOGIN,
               SELECT, EXAMINE, CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE, LIST, LSUB, STATUS, APPEND,
               CHECK, CLOSE, EXPUNGE, SEARCH, FETCH, STORE, COPY, UID} command_t;
+char commands[][16] = {"CAPABILITY", "NOOP", "LOGOUT",
+              "STARTTLS", "AUTHENTICATE", "LOGIN",
+              "SELECT", "EXAMINE", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE", "LIST", "LSUB", "STATUS", "APPEND",
+              "CHECK", "CLOSE", "EXPUNGE", "SEARCH", "FETCH", "STORE", "COPY", "UID"};
 
 typedef enum {NOTAUTHENTICATED = STARTTLS,
               AUTHENTICATED = SELECT,
               SELECTED = CHECK,
               LOGOUT_s} state_t;
+
+typedef struct {char tag[MAXLINE+1], name[MAXLINE+1], argv[10][MAXLINE+1]; int argc;} command;
+command_t name2type(char const name[MAXLINE+1]) {
+    int i;
+    char s[MAXLINE+1];
+
+    // Transforma o nome em caixa alta
+    strcpy(s, name);
+    for(i = 0; i < strlen(s); i++) {
+        s[i] = toupper(s[i]);
+    }
+
+    // Encontra o comando na lista
+    for(i = 0; i < 25; i++)
+        if(!strcmp(s, commands[i])) {
+            return (command_t)i;
+        }
+
+    return (command_t)(-1);
+}
+
 // typedef struct {state_t permitted; const char text[10]; } command_t;
 state_t state;
 
@@ -169,19 +195,29 @@ int main (int argc, char **argv) {
           * para que este servidor consiga interpretar comandos IMAP  */
 
 		// Comandos a ser implementados:
-		//    * login
-        //    * listar mensagens
+		//    * LOGIN: login
+        //    * LIST: listar mensagens
         //    * marcar mensagem como não lida
-        //    * download de anexos
+        //    * FETCH: download de anexos
         //    * apagar mensagens
-        //    * logout
+        //    * LOGOUT: logout
+        char *token;
+        char input[MAXLINE+1];
          while ((n=read(connfd, recvline, MAXLINE)) > 0) {
             recvline[n]=0;
+            strcpy(input, recvline);
+
             printf("[Cliente conectado no processo filho %d enviou:] ",getpid());
-            if ((fputs(recvline,stdout)) == EOF) {
-               perror("fputs :( \n");
-               exit(6);
+            token = strtok(input, " ");
+            while(token) {
+                if ((fputs(token,stdout)) == EOF) {
+                   perror("fputs :( \n");
+                   exit(6);
+                }
+                fputs("\n", stdout);
+                token = strtok(NULL, " ");
             }
+
             write(connfd, recvline, strlen(recvline));
          }
          /* ========================================================= */

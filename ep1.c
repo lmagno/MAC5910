@@ -49,19 +49,19 @@ typedef enum {OK, NO, BAD, PREAUTH, BYE} result_t;
 typedef enum {CAPABILITY, NOOP, LOGOUT,
               STARTTLS, AUTHENTICATE, LOGIN,
               SELECT, EXAMINE, CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE, LIST, LSUB, STATUS, APPEND,
-              CHECK, CLOSE, EXPUNGE, SEARCH, FETCH, STORE, COPY, UID} command_t;
+              CHECK, CLOSE, EXPUNGE, SEARCH, FETCH, STORE, COPY, UID} cmd_t;
 char commands[][16] = {"CAPABILITY", "NOOP", "LOGOUT",
               "STARTTLS", "AUTHENTICATE", "LOGIN",
               "SELECT", "EXAMINE", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE", "LIST", "LSUB", "STATUS", "APPEND",
               "CHECK", "CLOSE", "EXPUNGE", "SEARCH", "FETCH", "STORE", "COPY", "UID"};
 
-typedef enum {NOTAUTHENTICATED = STARTTLS,
-              AUTHENTICATED = SELECT,
-              SELECTED = CHECK,
+typedef enum {NOTAUTHENTICATED = LOGIN,
+              AUTHENTICATED = APPEND,
+              SELECTED = UID,
               LOGOUT_s} state_t;
 
-typedef struct {char tag[MAXLINE+1], name[MAXLINE+1], argv[10][MAXLINE+1]; int argc;} command;
-command_t name2type(char const name[MAXLINE+1]) {
+typedef struct {char tag[MAXLINE+1], argv[10][MAXLINE+1]; cmd_t cmd; int argc;} cmdline_t;
+cmd_t findcmd(char const name[MAXLINE+1]) {
     int i;
     char s[MAXLINE+1];
 
@@ -74,13 +74,13 @@ command_t name2type(char const name[MAXLINE+1]) {
     // Encontra o comando na lista
     for(i = 0; i < 25; i++)
         if(!strcmp(s, commands[i])) {
-            return (command_t)i;
+            return (cmd_t)i;
         }
 
-    return (command_t)(-1);
+    return (cmd_t)(-1);
 }
 
-// typedef struct {state_t permitted; const char text[10]; } command_t;
+// typedef struct {state_t permitted; const char text[10]; } cmd_t;
 state_t state;
 
 int main (int argc, char **argv) {
@@ -201,25 +201,69 @@ int main (int argc, char **argv) {
         //    * FETCH: download de anexos
         //    * apagar mensagens
         //    * LOGOUT: logout
+
+        // Sessão começa não autenticada
+        state = NOTAUTHENTICATED;
+
         char *token;
+        char *saveptr;
         char input[MAXLINE+1];
-         while ((n=read(connfd, recvline, MAXLINE)) > 0) {
+        cmd_t cmd;
+
+        while ((n=read(connfd, recvline, MAXLINE)) > 0) {
             recvline[n]=0;
+            // Copia a linha para manter uma cópia intacta
             strcpy(input, recvline);
 
-            printf("[Cliente conectado no processo filho %d enviou:] ",getpid());
-            token = strtok(input, " ");
-            while(token) {
-                if ((fputs(token,stdout)) == EOF) {
-                   perror("fputs :( \n");
-                   exit(6);
-                }
-                fputs("\n", stdout);
-                token = strtok(NULL, " ");
+            // struct que vai guardar a linha recebida
+            cmdline_t cmdline;
+
+
+            printf("[Cliente conectado no processo filho %d enviou:] ", getpid());
+
+            // Registra a tag da linha
+            token = strtok_r(input, " ", &saveptr);
+            strcpy(cmdline.tag, token);
+
+            // Identifica o comando
+            token = strtok_r(NULL, " ", &saveptr);
+            cmd = findcmd(token);
+            if((int)cmd == -1) {
+                perror("Commando inválido!\n");
+                exit(7);
+            } else if ((int)cmd > (int)state) {
+                fprintf(stderr, "cmd %d, state %d\n", (int)cmd, (int)state);
+                perror("Commando não permitido.\n");
+                exit(7);
+            } else {
+                cmdline.cmd = cmd;
             }
 
+            // Lê o restante dos argumentos
+            int i = 0;
+            while((token = strtok_r(NULL, " ", &saveptr)) != NULL) {
+                strcpy(cmdline.argv[i], token);
+                i++;
+            }
+
+            cmdline.argc = i;
+
+            fprintf(stdout, "tag: %s\n", cmdline.tag);
+            fprintf(stdout, "cmd: %s\n", commands[cmdline.cmd]);
+            for(i = 0; i < cmdline.argc; i++)
+                fprintf(stdout, "arg %d: %s\n", i, cmdline.argv[i]);
+
+            // while(token) {
+            //     if ((fputs(token,stdout)) == EOF) {
+            //        perror("fputs :( \n");
+            //        exit(6);
+            //     }
+            //     fputs("\n", stdout);
+            //     token = strtok(NULL, " ");
+            // }
+
             write(connfd, recvline, strlen(recvline));
-         }
+        }
          /* ========================================================= */
          /* ========================================================= */
          /*                         EP1 FIM                           */

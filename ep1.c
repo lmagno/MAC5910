@@ -45,7 +45,10 @@
 #define MAXDATASIZE 100
 #define MAXLINE 4096
 
-typedef enum {OK, NO, BAD, PREAUTH, BYE} result_t;
+// Condições de uma resposta
+typedef enum {OK, NO, BAD, PREAUTH, BYE} cond_t;
+
+// Comandos válidos
 typedef enum {CAPABILITY, NOOP, LOGOUT,
               STARTTLS, AUTHENTICATE, LOGIN,
               SELECT, EXAMINE, CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE, LIST, LSUB, STATUS, APPEND,
@@ -55,33 +58,25 @@ char commands[][16] = {"CAPABILITY", "NOOP", "LOGOUT",
               "SELECT", "EXAMINE", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE", "LIST", "LSUB", "STATUS", "APPEND",
               "CHECK", "CLOSE", "EXPUNGE", "SEARCH", "FETCH", "STORE", "COPY", "UID"};
 
+// Estados da sessão
+// Todos os comandos <= o estado são permitidos naquele estado
 typedef enum {NOTAUTHENTICATED = LOGIN,
               AUTHENTICATED = APPEND,
               SELECTED = UID,
               LOGOUT_s} state_t;
 
-typedef struct {char tag[MAXLINE+1], argv[10][MAXLINE+1]; cmd_t cmd; int argc;} cmdline_t;
-cmd_t findcmd(char const name[MAXLINE+1]) {
-    int i;
-    char s[MAXLINE+1];
+// Linha de comando recebida
+typedef struct {char tag[MAXLINE+1];    cmd_t cmd; char argv[10][MAXLINE+1]; int argc;} cmdline_t;
 
-    // Transforma o nome em caixa alta
-    strcpy(s, name);
-    for(i = 0; i < strlen(s); i++) {
-        s[i] = toupper(s[i]);
-    }
+// Resposta enviada
+typedef struct {char tag[MAXLINE+1];  cond_t cond; char text[MAXLINE+1];} resp_t;
 
-    // Encontra o comando na lista
-    for(i = 0; i < 25; i++)
-        if(!strcmp(s, commands[i])) {
-            return (cmd_t)i;
-        }
+// Lista de logins válidos
+char users[][2][MAXLINE+1] = {{"user1", "password1"},
+                              {"user2", "password2"}};
 
-    return (cmd_t)(-1);
-}
+cmd_t findcmd(char const name[MAXLINE+1]);
 
-// typedef struct {state_t permitted; const char text[10]; } cmd_t;
-state_t state;
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -203,7 +198,7 @@ int main (int argc, char **argv) {
         //    * LOGOUT: logout
 
         // Sessão começa não autenticada
-        state = NOTAUTHENTICATED;
+        state_t state = NOTAUTHENTICATED;
 
         char *token;
         char *saveptr;
@@ -219,7 +214,7 @@ int main (int argc, char **argv) {
             cmdline_t cmdline;
 
 
-            printf("[Cliente conectado no processo filho %d enviou:] ", getpid());
+            printf("[Cliente conectado no processo filho %d enviou:]\n", getpid());
 
             // Registra a tag da linha
             token = strtok_r(input, " ", &saveptr);
@@ -253,14 +248,30 @@ int main (int argc, char **argv) {
             for(i = 0; i < cmdline.argc; i++)
                 fprintf(stdout, "arg %d: %s\n", i, cmdline.argv[i]);
 
-            // while(token) {
-            //     if ((fputs(token,stdout)) == EOF) {
-            //        perror("fputs :( \n");
-            //        exit(6);
-            //     }
-            //     fputs("\n", stdout);
-            //     token = strtok(NULL, " ");
-            // }
+            // Decide o que fazer dependendo do comando
+            switch((int)cmdline.cmd) {
+                case LOGIN:
+                    // Autentica usuários
+                    break;
+                case LIST:
+                    // Lista as mensagens
+                    break;
+                case SELECT:
+                    // Seleciona diretório
+                    break;
+                case LOGOUT:
+                    // Faz o logout
+                    break;
+                case FETCH:
+                    // Faz download das mensagens
+                    break;
+                case STORE:
+                    // Altera flags de uma mensagem (ex: deletar)
+                    break;
+                default:
+                    // Comando não implementado
+                    break;
+            }
 
             write(connfd, recvline, strlen(recvline));
         }
@@ -282,4 +293,25 @@ int main (int argc, char **argv) {
 		close(connfd);
 	}
 	exit(0);
+}
+
+// Retorna o ID do comando a partir do nome
+// (-1 se não for encontrado na lista)
+cmd_t findcmd(char const name[MAXLINE+1]) {
+    int i;
+    char s[MAXLINE+1];
+
+    // Transforma o nome em caixa alta
+    strcpy(s, name);
+    for(i = 0; i < (int)strlen(s); i++) {
+        s[i] = toupper(s[i]);
+    }
+
+    // Encontra o comando na lista
+    for(i = 0; i < 25; i++)
+        if(!strcmp(s, commands[i])) {
+            return (cmd_t)i;
+        }
+
+    return (cmd_t)(-1);
 }

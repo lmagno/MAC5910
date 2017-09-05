@@ -72,11 +72,13 @@ typedef struct {char tag[MAXLINE+1];    cmd_t cmd; char argv[10][MAXLINE+1]; int
 typedef struct {char tag[MAXLINE+1];  cond_t cond; char text[MAXLINE+1];} resp_t;
 
 // Lista de logins válidos
-char users[][2][MAXLINE+1] = {{"user1", "password1"},
+char loginv[][2][MAXLINE+1] = {{"user1", "password1"},
                               {"user2", "password2"}};
+int loginc = 2;
 
 cmd_t findcmd(char const name[MAXLINE+1]);
-
+void respond(int connfd, char const *tag, char const *status, char const *message);
+void cmd_login(int connfd, cmdline_t cmdline, state_t *state);
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -217,41 +219,40 @@ int main (int argc, char **argv) {
             printf("[Cliente conectado no processo filho %d enviou:]\n", getpid());
 
             // Registra a tag da linha
-            token = strtok_r(input, " ", &saveptr);
+            token = strtok_r(input, " \t\n\r", &saveptr);
             strcpy(cmdline.tag, token);
 
             // Identifica o comando
-            token = strtok_r(NULL, " ", &saveptr);
+            token = strtok_r(NULL, " \t\n\r", &saveptr);
             cmd = findcmd(token);
-            if((int)cmd == -1) {
-                perror("Commando inválido!\n");
-                exit(7);
+            if(cmd == -1) {
+                respond(connfd, cmdline.tag, "BAD", "Comando inválido.");
+                continue;
             } else if ((int)cmd > (int)state) {
-                fprintf(stderr, "cmd %d, state %d\n", (int)cmd, (int)state);
-                perror("Commando não permitido.\n");
-                exit(7);
+                respond(connfd, cmdline.tag, "BAD", "Comando inválido.");
+                continue;
             } else {
                 cmdline.cmd = cmd;
             }
 
             // Lê o restante dos argumentos
             int i = 0;
-            while((token = strtok_r(NULL, " ", &saveptr)) != NULL) {
+            while((token = strtok_r(NULL, " \t\n\r", &saveptr)) != NULL) {
                 strcpy(cmdline.argv[i], token);
                 i++;
             }
 
             cmdline.argc = i;
 
-            fprintf(stdout, "tag: %s\n", cmdline.tag);
-            fprintf(stdout, "cmd: %s\n", commands[cmdline.cmd]);
+            fprintf(stdout, "tag: '%s'\n", cmdline.tag);
+            fprintf(stdout, "cmd: '%s'\n", commands[cmdline.cmd]);
             for(i = 0; i < cmdline.argc; i++)
-                fprintf(stdout, "arg %d: %s\n", i, cmdline.argv[i]);
+                fprintf(stdout, "arg %d: '%s'\n", i, cmdline.argv[i]);
 
             // Decide o que fazer dependendo do comando
-            switch((int)cmdline.cmd) {
+            switch(cmdline.cmd) {
                 case LOGIN:
-                    // Autentica usuários
+                    cmd_login(connfd, cmdline, &state);
                     break;
                 case LIST:
                     // Lista as mensagens
@@ -295,6 +296,46 @@ int main (int argc, char **argv) {
 	exit(0);
 }
 
+void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
+    int i;
+    char *login, *password;
+
+    // Checa se os argumentos estão corretos
+    if(cmdline.argc != 2) {
+        respond(connfd, cmdline.tag, "BAD", "Argumentos inválidos.");
+        return;
+    }
+
+    // Verifica se o par (login, senha) se encontra na lista de logins
+    login    = cmdline.argv[0];
+    password = cmdline.argv[1];
+
+    for(i = 0; i < loginc; i++) {
+        if(!strcmp(login, loginv[i][0]) && !strcmp(password, loginv[i][1])) {
+            respond(connfd, cmdline.tag, "OK", "Login feito.");
+            *state = AUTHENTICATED;
+            return;
+        }
+    }
+
+    // O login é inválido se não está na lista
+    respond(connfd, cmdline.tag, "NO", "Login inválido.");
+    return;
+}
+
+void respond(int connfd, char const *tag, char const *status, char const *message) {
+    // Escreve a linha de resposta pro cliente
+    write(connfd, tag,     strlen(tag));
+    write(connfd, " ",     1);
+    write(connfd, status,  strlen(status));
+    write(connfd, " ",     1);
+    write(connfd, message, strlen(message));
+    write(connfd, "\n",     1);
+
+    // Imprime localmente a resposta
+    fprintf(stdout, "%s %s %s\n", tag, status, message);
+}
+
 // Retorna o ID do comando a partir do nome
 // (-1 se não for encontrado na lista)
 cmd_t findcmd(char const name[MAXLINE+1]) {
@@ -313,5 +354,5 @@ cmd_t findcmd(char const name[MAXLINE+1]) {
             return (cmd_t)i;
         }
 
-    return (cmd_t)(-1);
+    return (cmd_t)-1;
 }

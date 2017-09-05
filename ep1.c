@@ -72,8 +72,8 @@ typedef struct {char tag[MAXLINE+1];    cmd_t cmd; char argv[10][MAXLINE+1]; int
 typedef struct {char tag[MAXLINE+1];  cond_t cond; char text[MAXLINE+1];} resp_t;
 
 // Lista de logins válidos
-char loginv[][2][MAXLINE+1] = {{"user1", "password1"},
-                              {"user2", "password2"}};
+char loginv[][2][MAXLINE+1] = {{"user1@localhost", "password1"},
+                              {"user2@localhost", "password2"}};
 int loginc = 2;
 
 cmd_t findcmd(char const name[MAXLINE+1]);
@@ -207,6 +207,7 @@ int main (int argc, char **argv) {
         char input[MAXLINE+1];
         cmd_t cmd;
 
+        respond(connfd, "*", "OK", "[CAPABILITY IMAP4rev1]");
         while ((n=read(connfd, recvline, MAXLINE)) > 0) {
             recvline[n]=0;
             // Copia a linha para manter uma cópia intacta
@@ -217,6 +218,7 @@ int main (int argc, char **argv) {
 
 
             printf("[Cliente conectado no processo filho %d enviou:]\n", getpid());
+            fprintf(stdout, "%s\n", recvline);
 
             // Registra a tag da linha
             token = strtok_r(input, " \t\n\r", &saveptr);
@@ -244,13 +246,16 @@ int main (int argc, char **argv) {
 
             cmdline.argc = i;
 
-            fprintf(stdout, "tag: '%s'\n", cmdline.tag);
-            fprintf(stdout, "cmd: '%s'\n", commands[cmdline.cmd]);
-            for(i = 0; i < cmdline.argc; i++)
-                fprintf(stdout, "arg %d: '%s'\n", i, cmdline.argv[i]);
+            // fprintf(stdout, "tag: '%s'\n", cmdline.tag);
+            // fprintf(stdout, "cmd: '%s'\n", commands[cmdline.cmd]);
+            // for(i = 0; i < cmdline.argc; i++)
+            //     fprintf(stdout, "arg %d: '%s'\n", i, cmdline.argv[i]);
 
             // Decide o que fazer dependendo do comando
             switch(cmdline.cmd) {
+                case AUTHENTICATE:
+                    respond(connfd, cmdline.tag, "NO", "SAI DAQUE");
+                    break;
                 case LOGIN:
                     cmd_login(connfd, cmdline, &state);
                     break;
@@ -274,7 +279,7 @@ int main (int argc, char **argv) {
                     break;
             }
 
-            write(connfd, recvline, strlen(recvline));
+            // write(connfd, recvline, strlen(recvline));
         }
          /* ========================================================= */
          /* ========================================================= */
@@ -309,6 +314,12 @@ void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
     // Verifica se o par (login, senha) se encontra na lista de logins
     login    = cmdline.argv[0];
     password = cmdline.argv[1];
+
+    // Remove aspas
+    if(login[0] == '"') login++;
+    if(password[0] == '"') password++;
+    if(login[strlen(login)-1] == '"') login[strlen(login)-1] = 0;
+    if(password[strlen(password)-1] == '"') password[strlen(password)-1] = 0;
 
     for(i = 0; i < loginc; i++) {
         if(!strcmp(login, loginv[i][0]) && !strcmp(password, loginv[i][1])) {

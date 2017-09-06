@@ -42,10 +42,12 @@
 #include <unistd.h>
 #include <fts.h>
 #include <stdbool.h>
+#include <signal.h>
 
 #define LISTENQ 1
 #define MAXDATASIZE 100
 #define MAXLINE 4096
+
 
 // Condições de uma resposta
 typedef enum {OK, NO, BAD, PREAUTH, BYE} cond_t;
@@ -87,6 +89,7 @@ msg_t parse_msg(FTSENT *file);
 void respond(int connfd, char const *tag, char const *status, char const *message);
 void cmd_login(int connfd, cmdline_t cmdline, state_t *state);
 void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state);
+void cmd_list(int connfd, cmdline_t cmdline);
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -101,6 +104,9 @@ int main (int argc, char **argv) {
 	char	recvline[MAXLINE + 1];
    /* Armazena o tamanho da string lida do cliente */
    ssize_t  n;
+
+   // Ignora SIGPIPE
+   signal(SIGPIPE, SIG_IGN);
 
 	if (argc != 2) {
       fprintf(stderr,"Uso: %s <Porta>\n",argv[0]);
@@ -226,8 +232,7 @@ int main (int argc, char **argv) {
             cmdline_t cmdline;
 
 
-            printf("[Cliente conectado no processo filho %d enviou:]\n", getpid());
-            fprintf(stdout, "%s\n", recvline);
+            printf("%d C: %s", getpid(), recvline);
 
             // Registra a tag da linha
             token = strtok_r(input, " \t\n\r", &saveptr);
@@ -270,7 +275,12 @@ int main (int argc, char **argv) {
                     strcpy(user, unquote(cmdline.argv[0]));
                     break;
                 case LIST:
-                    // Lista as mensagens
+                    // Lista as pastas
+                    cmd_list(connfd, cmdline);
+                    break;
+                case LSUB:
+                    respond(connfd, "*", "LSUB", "() \"\" INBOX");
+                    respond(connfd, cmdline.tag, "OK", "LSUB completado.");
                     break;
                 case SELECT:
                     // Seleciona diretório
@@ -278,15 +288,19 @@ int main (int argc, char **argv) {
                     break;
                 case LOGOUT:
                     // Faz o logout
+                    respond(connfd, "*", "BYE", "LOGOUT");
+                    respond(connfd, cmdline.tag, "OK", "LOGOUT");
+
                     break;
-                case FETCH:
-                    // Faz download das mensagens
-                    break;
-                case STORE:
-                    // Altera flags de uma mensagem (ex: deletar)
-                    break;
+                // case FETCH:
+                //     // Faz download das mensagens
+                //     break;
+                // case STORE:
+                //     // Altera flags de uma mensagem (ex: deletar)
+                //     break;
                 default:
                     // Comando não implementado
+                    respond(connfd, "BAD", commands[cmdline.cmd], "Comando não implementado.");
                     break;
             }
 
@@ -301,6 +315,7 @@ int main (int argc, char **argv) {
          /* Após ter feito toda a troca de informação com o cliente,
           * pode finalizar o processo filho */
          printf("[Uma conexao fechada]\n");
+         close(connfd);
          exit(0);
       }
       /**** PROCESSO PAI ****/
@@ -310,6 +325,14 @@ int main (int argc, char **argv) {
 		close(connfd);
 	}
 	exit(0);
+}
+
+void cmd_list(int connfd, cmdline_t cmdline) {
+    char *dir = cmdline.argv[1];
+    if(!strcmp(dir, "*") || !strcmp(dir, "INBOX")) {
+        respond(connfd, "*", "LIST", "() \"\" INBOX");
+    }
+    respond(connfd, cmdline.tag, "OK", "LIST completado.");
 }
 
 void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
@@ -336,11 +359,11 @@ void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
 
     // Flags
     respond(connfd, "*", "FLAGS", "(\\Deleted \\Seen)");
-    respond(connfd, "*", "OK", "[PERMANENTFLAGS (\\Deleted \\Seen \\*)]");
+    respond(connfd, "*", "OK", "[PERMANENTFLAGS (\\Deleted \\Seen)]");
 
     // Vê as mensagens existentes
     sprintf(path, "%s/Maildir/cur", user);
-    fprintf(stdout, "path = '%s'\n", path);
+    // fprintf(stdout, "path = '%s'\n", path);
 
     char* const argv[] = {path, NULL};
     if((dir = fts_open(argv, fts_options, NULL)) == NULL) {
@@ -355,16 +378,16 @@ void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
             if(file->fts_info != FTS_F) continue;
 
             msgs[exists++] = parse_msg(file);
-            fprintf(stdout, "%s\n", file->fts_path);
+            // fprintf(stdout, "%s\n", file->fts_path);
         }
     }
 
 
     // Número de mensagens existentes
     sprintf(resp, "%d", exists);
-    printf("resp = %s\n", resp); //BREAK
+    // printf("resp = %s\n", resp); //BREAK
     respond(connfd, "*", resp, "EXISTS");
-    respond(connfd, "*", resp, "RECENT");
+    respond(connfd, "*", "0", "RECENT");
 
     // Primeira não-lida e provável próxima
     unseen = INT32_MAX;
@@ -377,7 +400,7 @@ void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
 
     if(unseen > 0) {
         sprintf(resp, "[UNSEEN %d]", unseen);
-        respond(connfd, "*", resp, "");
+        respond(connfd, "*", "OK", resp);
     }
 
     if(unseen + 1 < exists) {
@@ -386,8 +409,9 @@ void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
     }
 
     // Finaliza
-    respond(connfd, cmdline.tag, "OK", "[READ-WRITE] Completado select.");
+    respond(connfd, cmdline.tag, "OK", "[READ-WRITE] SELECT completado");
 
+    *state = SELECTED;
     fts_close(dir);
 }
 
@@ -411,14 +435,14 @@ void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
 
     for(i = 0; i < loginc; i++) {
         if(!strcmp(login, loginv[i][0]) && !strcmp(password, loginv[i][1])) {
-            respond(connfd, cmdline.tag, "OK", "Login feito.");
+            respond(connfd, cmdline.tag, "OK", "LOGIN");
             *state = AUTHENTICATED;
             return;
         }
     }
 
     // O login é inválido se não está na lista
-    respond(connfd, cmdline.tag, "NO", "Login inválido.");
+    respond(connfd, cmdline.tag, "NO", "LOGIN");
     return;
 }
 
@@ -474,7 +498,7 @@ void respond(int connfd, char const *tag, char const *status, char const *messag
     write(connfd, resp, strlen(resp));
 
     // Imprime localmente a resposta
-    fprintf(stdout, "%s", resp);
+    printf("%d S: %s", getpid(), resp);
 }
 
 // Retorna o ID do comando a partir do nome

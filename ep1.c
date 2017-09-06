@@ -40,6 +40,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
+#include <fts.h>
+#include <stdbool.h>
 
 #define LISTENQ 1
 #define MAXDATASIZE 100
@@ -71,14 +73,20 @@ typedef struct {char tag[MAXLINE+1];    cmd_t cmd; char argv[10][MAXLINE+1]; int
 // Resposta enviada
 typedef struct {char tag[MAXLINE+1];  cond_t cond; char text[MAXLINE+1];} resp_t;
 
+// Mensagem armazenada
+typedef struct {FTSENT *file; bool seen, deleted; int id;} msg_t;
+
 // Lista de logins válidos
 char loginv[][2][MAXLINE+1] = {{"user1@localhost", "password1"},
                               {"user2@localhost", "password2"}};
 int loginc = 2;
 
+char* unquote(char *s);
 cmd_t findcmd(char const name[MAXLINE+1]);
+msg_t parse_msg(FTSENT *file);
 void respond(int connfd, char const *tag, char const *status, char const *message);
 void cmd_login(int connfd, cmdline_t cmdline, state_t *state);
+void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state);
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -206,6 +214,7 @@ int main (int argc, char **argv) {
         char *saveptr;
         char input[MAXLINE+1];
         cmd_t cmd;
+        char user[MAXLINE+1];
 
         respond(connfd, "*", "OK", "[CAPABILITY IMAP4rev1]");
         while ((n=read(connfd, recvline, MAXLINE)) > 0) {
@@ -258,12 +267,14 @@ int main (int argc, char **argv) {
                     break;
                 case LOGIN:
                     cmd_login(connfd, cmdline, &state);
+                    strcpy(user, unquote(cmdline.argv[0]));
                     break;
                 case LIST:
                     // Lista as mensagens
                     break;
                 case SELECT:
                     // Seleciona diretório
+                    cmd_select(connfd, cmdline, user, &state);
                     break;
                 case LOGOUT:
                     // Faz o logout
@@ -301,6 +312,85 @@ int main (int argc, char **argv) {
 	exit(0);
 }
 
+void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
+    char *inbox, resp[MAXLINE+1];
+    char path[MAXLINE+1];
+    int exists, unseen;
+    msg_t msgs[10];
+    FTS *dir;
+    FTSENT *file, *children;
+    int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
+
+    // Checa argumentos
+    if(cmdline.argc != 1) {
+        respond(connfd, cmdline.tag, "BAD", "Argumentos inválidos.");
+        return;
+    }
+
+    // Só existe a pasta INBOX
+    inbox = unquote(cmdline.argv[0]);
+    if(strcmp(inbox, "INBOX") != 0) {
+        respond(connfd, cmdline.tag, "NO", "Não existe esse diretório.");
+        return;
+    }
+
+    // Flags
+    respond(connfd, "*", "FLAGS", "(\\Deleted \\Seen)");
+    respond(connfd, "*", "OK", "[PERMANENTFLAGS (\\Deleted \\Seen \\*)]");
+
+    // Vê as mensagens existentes
+    sprintf(path, "%s/Maildir/cur", user);
+    fprintf(stdout, "path = '%s'\n", path);
+
+    char* const argv[] = {path, NULL};
+    if((dir = fts_open(argv, fts_options, NULL)) == NULL) {
+        perror("Não foi possível abrir o diretório 'cur'.\n");
+        exit(7);
+    }
+
+    exists = 0; // Inicia contador de mensagens
+    children = fts_children(dir, 0);
+    if(children != NULL) {
+        while((file = fts_read(dir)) != NULL) {
+            if(file->fts_info != FTS_F) continue;
+
+            msgs[exists++] = parse_msg(file);
+            fprintf(stdout, "%s\n", file->fts_path);
+        }
+    }
+
+
+    // Número de mensagens existentes
+    sprintf(resp, "%d", exists);
+    printf("resp = %s\n", resp); //BREAK
+    respond(connfd, "*", resp, "EXISTS");
+    respond(connfd, "*", resp, "RECENT");
+
+    // Primeira não-lida e provável próxima
+    unseen = INT32_MAX;
+    for(int i = 0; i < exists; i++) {
+        if(!msgs[i].seen) {
+            unseen = msgs[i].id;
+            break;
+        }
+    }
+
+    if(unseen > 0) {
+        sprintf(resp, "[UNSEEN %d]", unseen);
+        respond(connfd, "*", resp, "");
+    }
+
+    if(unseen + 1 < exists) {
+        sprintf(resp, "[UIDNEXT %d]", unseen+1);
+        respond(connfd, "*", resp, "");
+    }
+
+    // Finaliza
+    respond(connfd, cmdline.tag, "OK", "[READ-WRITE] Completado select.");
+
+    fts_close(dir);
+}
+
 void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
     int i;
     char *login, *password;
@@ -316,10 +406,8 @@ void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
     password = cmdline.argv[1];
 
     // Remove aspas
-    if(login[0] == '"') login++;
-    if(password[0] == '"') password++;
-    if(login[strlen(login)-1] == '"') login[strlen(login)-1] = 0;
-    if(password[strlen(password)-1] == '"') password[strlen(password)-1] = 0;
+    login = unquote(login);
+    password = unquote(password);
 
     for(i = 0; i < loginc; i++) {
         if(!strcmp(login, loginv[i][0]) && !strcmp(password, loginv[i][1])) {
@@ -334,17 +422,59 @@ void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
     return;
 }
 
+msg_t parse_msg(FTSENT *file) {
+    char *token, *saveptr, filename[MAXLINE+1];
+    msg_t msg;
+    int i;
+
+    msg.file = file;
+    strcpy(filename, file->fts_name);
+
+    // Primeira parte do nome é o id
+    token = strtok_r(filename, ":", &saveptr);
+    msg.id = atoi(token);
+
+    // Versão do Maildir
+    token = strtok_r(NULL, ",", &saveptr);
+
+    // Flags
+    msg.seen = false;
+    msg.deleted = false;
+    token = strtok_r(NULL, "\n\r", &saveptr);
+    if(!token)
+        return msg;
+
+    for(i = 0; i < (int)strlen(token); i++) {
+        switch(token[i]) {
+            case 'S':
+                msg.seen = true;
+                break;
+            case 'D':
+                msg.deleted = true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    return msg;
+}
+char* unquote(char *s) {
+    if(s[0] == '"') s++;
+    if(s[strlen(s)-1] == '"') s[strlen(s)-1] = 0;
+
+    return s;
+}
+
 void respond(int connfd, char const *tag, char const *status, char const *message) {
+    char resp[MAXLINE+1];
+
     // Escreve a linha de resposta pro cliente
-    write(connfd, tag,     strlen(tag));
-    write(connfd, " ",     1);
-    write(connfd, status,  strlen(status));
-    write(connfd, " ",     1);
-    write(connfd, message, strlen(message));
-    write(connfd, "\n",     1);
+    sprintf(resp, "%s %s %s\r\n", tag, status, message);
+    write(connfd, resp, strlen(resp));
 
     // Imprime localmente a resposta
-    fprintf(stdout, "%s %s %s\n", tag, status, message);
+    fprintf(stdout, "%s", resp);
 }
 
 // Retorna o ID do comando a partir do nome

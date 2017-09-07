@@ -35,6 +35,7 @@
 #include <ctype.h>
 #include <netdb.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -83,13 +84,19 @@ char loginv[][2][MAXLINE+1] = {{"user1@localhost", "password1"},
                               {"user2@localhost", "password2"}};
 int loginc = 2;
 
+// Sessão
+typedef struct {int pid, connfd; char *user; state_t state; msg_t messages[10]; int exists, unseen;} session_t;
+
+char* uppercase(char *s);
 char* unquote(char *s);
 cmd_t findcmd(char const name[MAXLINE+1]);
-msg_t parse_msg(FTSENT *file);
-void respond(int connfd, char const *tag, char const *status, char const *message);
-void cmd_login(int connfd, cmdline_t cmdline, state_t *state);
-void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state);
-void cmd_list(int connfd, cmdline_t cmdline);
+msg_t parse_title(FTSENT *file);
+
+void respond(char const *tag, char const *status, char const *message, session_t *session);
+void cmd_login(cmdline_t cmdline, session_t *session);
+void cmd_select(cmdline_t cmdline, session_t *session);
+void cmd_list(cmdline_t cmdline, session_t *session);
+void cmd_uid(cmdline_t cmdline, session_t *session);
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -144,6 +151,7 @@ int main (int argc, char **argv) {
 		exit(3);
 	}
 
+
    /* Como este código é o código de um servidor, o socket será um
     * socket passivo. Para isto é necessário chamar a função listen
     * que define que este é um socket de servidor que ficará esperando
@@ -170,6 +178,7 @@ int main (int argc, char **argv) {
 			perror("accept :(\n");
 			exit(5);
 		}
+
 
       /* Agora o servidor precisa tratar este cliente de forma
        * separada. Para isto é criado um processo filho usando a
@@ -213,49 +222,87 @@ int main (int argc, char **argv) {
         //    * apagar mensagens
         //    * LOGOUT: logout
 
-        // Sessão começa não autenticada
-        state_t state = NOTAUTHENTICATED;
 
         char *token;
         char *saveptr;
+        char *c; // ponteiro para a posição equivalente de 'input' em 'recvline'
         char input[MAXLINE+1];
+        char resp[MAXLINE+1];
         cmd_t cmd;
-        char user[MAXLINE+1];
+        session_t session = {getpid(), connfd, NULL, NOTAUTHENTICATED};
 
-        respond(connfd, "*", "OK", "[CAPABILITY IMAP4rev1]");
-        while ((n=read(connfd, recvline, MAXLINE)) > 0) {
+        respond("*", "OK", "[CAPABILITY IMAP4rev1]", &session);
+        while ((n=read(session.connfd, recvline, MAXLINE)) > 0) {
             recvline[n]=0;
             // Copia a linha para manter uma cópia intacta
             strcpy(input, recvline);
+            c = recvline;
+            printf("c = %c\n", c[0]);
 
             // struct que vai guardar a linha recebida
             cmdline_t cmdline;
 
 
-            printf("%d C: %s", getpid(), recvline);
+            printf("%d C: %s", session.pid, recvline);
 
             // Registra a tag da linha
             token = strtok_r(input, " \t\n\r", &saveptr);
+            printf("token = %s\n", token);
             strcpy(cmdline.tag, token);
+            c += strlen(token);
+            printf("c = %c\n", c[0]);
 
             // Identifica o comando
             token = strtok_r(NULL, " \t\n\r", &saveptr);
-            cmd = findcmd(token);
+            printf("token = %s\n", token);
+            c += strlen(token)+1;
+            printf("c = %c\n", c[0]);
+
+            cmd = findcmd(uppercase(token));
             if(cmd == -1) {
-                respond(connfd, cmdline.tag, "BAD", "Comando inválido.");
+                sprintf(resp, "%s Comando inválido", token);
+                respond(cmdline.tag, "BAD", resp, &session);
                 continue;
-            } else if ((int)cmd > (int)state) {
-                respond(connfd, cmdline.tag, "BAD", "Comando inválido.");
+            } else if ((int)cmd > (int)session.state) {
+                sprintf(resp, "%s Comando não permitido", token);
+                respond(cmdline.tag, "BAD", resp, &session);
                 continue;
             } else {
                 cmdline.cmd = cmd;
             }
 
+
             // Lê o restante dos argumentos
-            int i = 0;
+            int i = 0, j;
+            int par;
+            int lp, rp;
             while((token = strtok_r(NULL, " \t\n\r", &saveptr)) != NULL) {
-                strcpy(cmdline.argv[i], token);
-                i++;
+                printf("token_npar = %s\n", token);
+                strcpy(cmdline.argv[i++], token);
+                c += strlen(token)+1;
+
+                // Verifica se existe um abre parênteses,
+                // nesse caso tudo até o próximo fecha parênteses
+                // é um único argumento
+                if((saveptr != NULL) && saveptr[0] == '(') {
+                    // Encontra o próximo ')'
+                    // "par" indica a diferença entre '(' e ')' encontrados
+                    par = 1;
+                    j = 0;
+                    while(par != 0) {
+                        j++;
+                        if(saveptr[j] == '(') par++;
+                        else if(saveptr[j] == ')') par--;
+                    }
+                    // Salva o bloco input[saveptr, ..., saveptr+(j-1)) como argumento
+                    saveptr[j] = 0;
+                    strcpy(cmdline.argv[i++], saveptr+1);
+                    printf("token_par = %s\n", cmdline.argv[i-1]);
+                    c += j;
+                    // Reinicia o token
+                    saveptr += j+1;
+                }
+
             }
 
             cmdline.argc = i;
@@ -268,28 +315,30 @@ int main (int argc, char **argv) {
             // Decide o que fazer dependendo do comando
             switch(cmdline.cmd) {
                 case AUTHENTICATE:
-                    respond(connfd, cmdline.tag, "NO", "SAI DAQUE");
+                    respond(cmdline.tag, "NO", "SAI DAQUE", &session);
                     break;
                 case LOGIN:
-                    cmd_login(connfd, cmdline, &state);
-                    strcpy(user, unquote(cmdline.argv[0]));
+                    cmd_login(cmdline, &session);
                     break;
                 case LIST:
                     // Lista as pastas
-                    cmd_list(connfd, cmdline);
+                    cmd_list(cmdline, &session);
                     break;
                 case LSUB:
-                    respond(connfd, "*", "LSUB", "() \"\" INBOX");
-                    respond(connfd, cmdline.tag, "OK", "LSUB completado.");
+                    respond("*", "LSUB", "() \"\" INBOX", &session);
+                    respond(cmdline.tag, "OK", "LSUB completado.", &session);
                     break;
                 case SELECT:
                     // Seleciona diretório
-                    cmd_select(connfd, cmdline, user, &state);
+                    cmd_select(cmdline, &session);
+                    break;
+                case UID:
+                    cmd_uid(cmdline, &session);
                     break;
                 case LOGOUT:
                     // Faz o logout
-                    respond(connfd, "*", "BYE", "LOGOUT");
-                    respond(connfd, cmdline.tag, "OK", "LOGOUT");
+                    respond("*", "BYE", "LOGOUT", &session);
+                    respond(cmdline.tag, "OK", "LOGOUT", &session);
 
                     break;
                 // case FETCH:
@@ -300,11 +349,11 @@ int main (int argc, char **argv) {
                 //     break;
                 default:
                     // Comando não implementado
-                    respond(connfd, "BAD", commands[cmdline.cmd], "Comando não implementado.");
+                    respond("BAD", commands[cmdline.cmd], "Comando não implementado.", &session);
                     break;
             }
 
-            // write(connfd, recvline, strlen(recvline));
+            // write(session.connfd, recvline, strlen(recvline));
         }
          /* ========================================================= */
          /* ========================================================= */
@@ -315,7 +364,7 @@ int main (int argc, char **argv) {
          /* Após ter feito toda a troca de informação com o cliente,
           * pode finalizar o processo filho */
          printf("[Uma conexao fechada]\n");
-         close(connfd);
+         close(session.connfd);
          exit(0);
       }
       /**** PROCESSO PAI ****/
@@ -327,42 +376,131 @@ int main (int argc, char **argv) {
 	exit(0);
 }
 
-void cmd_list(int connfd, cmdline_t cmdline) {
-    char *dir = cmdline.argv[1];
-    if(!strcmp(dir, "*") || !strcmp(dir, "INBOX")) {
-        respond(connfd, "*", "LIST", "() \"\" INBOX");
+void cmd_uid(cmdline_t cmdline, session_t *session) {
+    char *token, *saveptr, *options;
+    int a, b; // Range
+    int i;
+    bool asterisk;
+    bool flags, size, body, peek, header;
+    char tmp[MAXLINE+1], resp[MAXLINE+1], filename[MAXLINE+1], line[MAXLINE+1];
+    FILE *file;
+    msg_t msg;
+
+    // Checa número de argumentos
+    if(cmdline.argc != 3) {
+        respond(cmdline.tag, "BAD", "UID Argumentos inválidos", session);
+        return;
     }
-    respond(connfd, cmdline.tag, "OK", "LIST completado.");
+
+    // Só o fetch foi implementado
+    if(strcmp("FETCH", uppercase(cmdline.argv[0]))) {
+        respond(cmdline.tag, "BAD", "UID Comando não implementado.", session);
+        return;
+    }
+
+    // Range
+    token = strtok_r(cmdline.argv[1],":", &saveptr);
+    a = atoi(token);
+
+    token = strtok_r(NULL,"\r\n", &saveptr);
+    b = atoi(token);
+
+    // Opçõesa
+    options = uppercase(cmdline.argv[2]);
+     flags = (strstr(options, "FLAGS") != NULL);
+      size = (strstr(options, "RF822.SIZE") != NULL);
+      body = (strstr(options, "BODY") != NULL);
+      peek = (strstr(options, "PEEK") != NULL);
+    header = (strstr(options, "HEADER") != NULL);
+
+    asterisk = (a == 0 || b == 0);
+    if(b == 0) b = INT32_MAX;
+
+    // Nenhum dois dois é '*'
+    for(i = 0; i < session->exists; i++) {
+        msg = session->messages[i];
+        tmp[0] = 0;
+
+        // Filtra as mensagens com ID dentro do intervalo
+        // e a última se houver um asterisco
+        if((msg.id >= a && msg.id <= b) || (i == session->exists-1 && asterisk)) {
+            // UID
+            sprintf(tmp+strlen(tmp), "UID %d", msg.id);
+
+            // Size
+            if(size) sprintf(tmp+strlen(tmp), " RF822.SIZE %lld", (long long)msg.file->fts_statp->st_size);
+
+            // Flags
+            if(flags) {
+                sprintf(tmp+strlen(tmp), " FLAGS (");
+                if(msg.deleted) sprintf(tmp+strlen(tmp), " \\Deleted");
+                if(msg.seen) sprintf(tmp+strlen(tmp), " \\Seen");
+                sprintf(tmp+strlen(tmp), ")");
+            }
+
+            // Só responde de volta
+            sprintf(tmp+strlen(tmp), " %s", options);
+
+            sprintf(resp, "%d FETCH (%s)", msg.id, tmp);
+            respond("*", resp, "", session);
+
+            // Retorna o email de fato (ou só o cabeçalho)
+            if(body) {
+                strncpy(filename, msg.file->fts_path, msg.file->fts_pathlen);
+                filename[msg.file->fts_pathlen] = 0;
+
+                file = fopen(msg.file->fts_path, "r");
+                while(fgets(line, MAXLINE, file) != NULL) {
+                    respond("*", line, "", session);
+
+                    if(strstr(line, "text/plain") || strstr(line, "boundary"))
+                        break;
+
+                }
+
+                fclose(file);
+            }
+        }
+    }
+
+    respond(cmdline.tag, "OK", "UID", session);
 }
 
-void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
+
+void cmd_list(cmdline_t cmdline, session_t *session) {
+    char *dir = cmdline.argv[1];
+    if(!strcmp(dir, "*") || !strcmp(dir, "INBOX")) {
+        respond("*", "LIST", "() \"\" INBOX", session);
+    }
+    respond(cmdline.tag, "OK", "LIST completado.", session);
+}
+
+void cmd_select(cmdline_t cmdline, session_t *session) {
     char *inbox, resp[MAXLINE+1];
     char path[MAXLINE+1];
-    int exists, unseen;
-    msg_t msgs[10];
     FTS *dir;
     FTSENT *file, *children;
     int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
 
     // Checa argumentos
     if(cmdline.argc != 1) {
-        respond(connfd, cmdline.tag, "BAD", "Argumentos inválidos.");
+        respond(cmdline.tag, "BAD", "Argumentos inválidos.", session);
         return;
     }
 
     // Só existe a pasta INBOX
     inbox = unquote(cmdline.argv[0]);
     if(strcmp(inbox, "INBOX") != 0) {
-        respond(connfd, cmdline.tag, "NO", "Não existe esse diretório.");
+        respond(cmdline.tag, "NO", "Não existe esse diretório.", session);
         return;
     }
 
     // Flags
-    respond(connfd, "*", "FLAGS", "(\\Deleted \\Seen)");
-    respond(connfd, "*", "OK", "[PERMANENTFLAGS (\\Deleted \\Seen)]");
+    respond("*", "FLAGS", "(\\Deleted \\Seen)", session);
+    respond("*", "OK", "[PERMANENTFLAGS (\\Deleted \\Seen)]", session);
 
     // Vê as mensagens existentes
-    sprintf(path, "%s/Maildir/cur", user);
+    sprintf(path, "%s/Maildir/cur", session->user);
     // fprintf(stdout, "path = '%s'\n", path);
 
     char* const argv[] = {path, NULL};
@@ -371,57 +509,57 @@ void cmd_select(int connfd, cmdline_t cmdline, char *user, state_t *state) {
         exit(7);
     }
 
-    exists = 0; // Inicia contador de mensagens
+    session->exists = 0; // Inicia contador de mensagens
     children = fts_children(dir, 0);
     if(children != NULL) {
         while((file = fts_read(dir)) != NULL) {
             if(file->fts_info != FTS_F) continue;
 
-            msgs[exists++] = parse_msg(file);
+            session->messages[session->exists++] = parse_title(file);
             // fprintf(stdout, "%s\n", file->fts_path);
         }
     }
 
 
     // Número de mensagens existentes
-    sprintf(resp, "%d", exists);
+    sprintf(resp, "%d", session->exists);
     // printf("resp = %s\n", resp); //BREAK
-    respond(connfd, "*", resp, "EXISTS");
-    respond(connfd, "*", "0", "RECENT");
+    respond("*", resp, "EXISTS", session);
+    respond("*", "0", "RECENT", session);
 
     // Primeira não-lida e provável próxima
-    unseen = INT32_MAX;
-    for(int i = 0; i < exists; i++) {
-        if(!msgs[i].seen) {
-            unseen = msgs[i].id;
+    session->unseen = 0;
+    for(int i = 0; i < session->exists; i++) {
+        if(!session->messages[i].seen) {
+            session->unseen = session->messages[i].id;
             break;
         }
     }
 
-    if(unseen > 0) {
-        sprintf(resp, "[UNSEEN %d]", unseen);
-        respond(connfd, "*", "OK", resp);
+    if(session->unseen > 0) {
+        sprintf(resp, "[UNSEEN %d]", session->unseen);
+        respond("*", "OK", resp, session);
     }
 
-    if(unseen + 1 < exists) {
-        sprintf(resp, "[UIDNEXT %d]", unseen+1);
-        respond(connfd, "*", resp, "");
+    if(session->unseen + 1 < session->exists) {
+        sprintf(resp, "[UIDNEXT %d]", session->unseen+1);
+        respond("*", resp, "", session);
     }
 
     // Finaliza
-    respond(connfd, cmdline.tag, "OK", "[READ-WRITE] SELECT completado");
+    respond(cmdline.tag, "OK", "[READ-WRITE] SELECT completado", session);
 
-    *state = SELECTED;
+    session->state = SELECTED;
     fts_close(dir);
 }
 
-void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
+void cmd_login(cmdline_t cmdline, session_t *session) {
     int i;
     char *login, *password;
 
     // Checa se os argumentos estão corretos
     if(cmdline.argc != 2) {
-        respond(connfd, cmdline.tag, "BAD", "Argumentos inválidos.");
+        respond(cmdline.tag, "BAD", "Argumentos inválidos.", session);
         return;
     }
 
@@ -435,18 +573,19 @@ void cmd_login(int connfd, cmdline_t cmdline, state_t *state) {
 
     for(i = 0; i < loginc; i++) {
         if(!strcmp(login, loginv[i][0]) && !strcmp(password, loginv[i][1])) {
-            respond(connfd, cmdline.tag, "OK", "LOGIN");
-            *state = AUTHENTICATED;
+            respond(cmdline.tag, "OK", "LOGIN", session);
+            session->user = loginv[i][0];
+            session->state = AUTHENTICATED;
             return;
         }
     }
 
     // O login é inválido se não está na lista
-    respond(connfd, cmdline.tag, "NO", "LOGIN");
+    respond(cmdline.tag, "NO", "LOGIN", session);
     return;
 }
 
-msg_t parse_msg(FTSENT *file) {
+msg_t parse_title(FTSENT *file) {
     char *token, *saveptr, filename[MAXLINE+1];
     msg_t msg;
     int i;
@@ -490,34 +629,45 @@ char* unquote(char *s) {
     return s;
 }
 
-void respond(int connfd, char const *tag, char const *status, char const *message) {
+void respond(char const *tag, char const *status, char const *message, session_t *session) {
     char resp[MAXLINE+1];
 
     // Escreve a linha de resposta pro cliente
     sprintf(resp, "%s %s %s\r\n", tag, status, message);
-    write(connfd, resp, strlen(resp));
+    write(session->connfd, resp, strlen(resp));
 
     // Imprime localmente a resposta
-    printf("%d S: %s", getpid(), resp);
+    printf("%d S: %s", session->pid, resp);
 }
 
 // Retorna o ID do comando a partir do nome
 // (-1 se não for encontrado na lista)
 cmd_t findcmd(char const name[MAXLINE+1]) {
     int i;
-    char s[MAXLINE+1];
-
-    // Transforma o nome em caixa alta
-    strcpy(s, name);
-    for(i = 0; i < (int)strlen(s); i++) {
-        s[i] = toupper(s[i]);
-    }
 
     // Encontra o comando na lista
     for(i = 0; i < 25; i++)
-        if(!strcmp(s, commands[i])) {
+        if(!strcmp(name, commands[i])) {
             return (cmd_t)i;
         }
 
     return (cmd_t)-1;
+}
+
+char* uppercase(char *s) {
+    int i;
+    char c;
+
+    for(i = 0; i < (int)strlen(s); i++) {
+        c = s[i];
+        if(isalpha(c)){
+            s[i] = toupper(c);
+        }
+    }
+
+    return s;
+}
+
+void parse_msg(msg_t *msg) {
+
 }

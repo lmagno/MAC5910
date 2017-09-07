@@ -234,29 +234,25 @@ int main (int argc, char **argv) {
         respond("*", "OK", "[CAPABILITY IMAP4rev1]", &session);
         while ((n=read(session.connfd, recvline, MAXLINE)) > 0) {
             recvline[n]=0;
+
+            printf("%d C: %s", session.pid, recvline);
             // Copia a linha para manter uma cópia intacta
             strcpy(input, recvline);
             c = recvline;
-            printf("c = %c\n", c[0]);
 
             // struct que vai guardar a linha recebida
             cmdline_t cmdline;
 
 
-            printf("%d C: %s", session.pid, recvline);
 
             // Registra a tag da linha
             token = strtok_r(input, " \t\n\r", &saveptr);
-            printf("token = %s\n", token);
             strcpy(cmdline.tag, token);
             c += strlen(token);
-            printf("c = %c\n", c[0]);
 
             // Identifica o comando
             token = strtok_r(NULL, " \t\n\r", &saveptr);
-            printf("token = %s\n", token);
             c += strlen(token)+1;
-            printf("c = %c\n", c[0]);
 
             cmd = findcmd(uppercase(token));
             if(cmd == -1) {
@@ -275,9 +271,7 @@ int main (int argc, char **argv) {
             // Lê o restante dos argumentos
             int i = 0, j;
             int par;
-            int lp, rp;
             while((token = strtok_r(NULL, " \t\n\r", &saveptr)) != NULL) {
-                printf("token_npar = %s\n", token);
                 strcpy(cmdline.argv[i++], token);
                 c += strlen(token)+1;
 
@@ -297,7 +291,6 @@ int main (int argc, char **argv) {
                     // Salva o bloco input[saveptr, ..., saveptr+(j-1)) como argumento
                     saveptr[j] = 0;
                     strcpy(cmdline.argv[i++], saveptr+1);
-                    printf("token_par = %s\n", cmdline.argv[i-1]);
                     c += j;
                     // Reinicia o token
                     saveptr += j+1;
@@ -371,7 +364,7 @@ int main (int argc, char **argv) {
       /* Se for o pai, a única coisa a ser feita é fechar o socket
        * connfd (ele é o socket do cliente específico que será tratado
        * pelo processo filho) */
-		close(connfd);
+	   close(connfd);
 	}
 	exit(0);
 }
@@ -382,6 +375,7 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
     int i;
     bool asterisk;
     bool flags, size, body, peek, header;
+    int hsize;
     char tmp[MAXLINE+1], resp[MAXLINE+1], filename[MAXLINE+1], line[MAXLINE+1];
     FILE *file;
     msg_t msg;
@@ -399,22 +393,36 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
     }
 
     // Range
-    token = strtok_r(cmdline.argv[1],":", &saveptr);
-    a = atoi(token);
+    char *range = cmdline.argv[1];
+    if(strchr(range, ':') == NULL) {
+        // Só foi pedido uma única mensagem
+        a = b = atoi(range);
+    } else {
+        asterisk = (strchr(range, '*') != NULL);
 
-    token = strtok_r(NULL,"\r\n", &saveptr);
-    b = atoi(token);
+        token = strtok_r(range,":", &saveptr);
+        a = atoi(token);
 
-    // Opçõesa
+        token = strtok_r(NULL,"\r\n", &saveptr);
+        b = atoi(token);
+
+        if(b == 0) b = INT32_MAX;
+    }
+
+    // Opções
     options = uppercase(cmdline.argv[2]);
      flags = (strstr(options, "FLAGS") != NULL);
-      size = (strstr(options, "RF822.SIZE") != NULL);
+      size = (strstr(options, "RFC822.SIZE") != NULL);
       body = (strstr(options, "BODY") != NULL);
       peek = (strstr(options, "PEEK") != NULL);
     header = (strstr(options, "HEADER") != NULL);
 
-    asterisk = (a == 0 || b == 0);
-    if(b == 0) b = INT32_MAX;
+    // Só mantém o que está entre colchetes
+    if(body)
+        options = strchr(options, '[');
+
+
+
 
     // Nenhum dois dois é '*'
     for(i = 0; i < session->exists; i++) {
@@ -428,7 +436,7 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
             sprintf(tmp+strlen(tmp), "UID %d", msg.id);
 
             // Size
-            if(size) sprintf(tmp+strlen(tmp), " RF822.SIZE %lld", (long long)msg.file->fts_statp->st_size);
+            if(size) sprintf(tmp+strlen(tmp), " RFC822.SIZE %lld", (long long)msg.file->fts_statp->st_size);
 
             // Flags
             if(flags) {
@@ -438,32 +446,72 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
                 sprintf(tmp+strlen(tmp), ")");
             }
 
-            // Só responde de volta
-            sprintf(tmp+strlen(tmp), " %s", options);
+            if(!body) {
+                // Só responde de volta
+                sprintf(resp, "%d FETCH (%s)", msg.id, tmp);
+                respond("*", resp, NULL, session);
+            } else {
+                // Retorna o email de fato (ou só o cabeçalho)
 
-            sprintf(resp, "%d FETCH (%s)", msg.id, tmp);
-            respond("*", resp, "", session);
+                // Pega o caminho até o arquivo
+                sprintf(filename, "%s/", msg.file->fts_path);
+                strcat(filename, msg.file->fts_name);
 
-            // Retorna o email de fato (ou só o cabeçalho)
-            if(body) {
-                strncpy(filename, msg.file->fts_path, msg.file->fts_pathlen);
-                filename[msg.file->fts_pathlen] = 0;
+                // Abre o arquivo
+                file = fopen(filename, "r");
+                if(!file) {
+                    perror(filename);
+                    exit(9);
+                }
 
-                file = fopen(msg.file->fts_path, "r");
+                if(header) {
+                    // Calcula o tamanho da mensagem a ser enviada
+                    hsize = 0;
+                    while(fgets(line, MAXLINE, file) != NULL) {
+                        // Remove a quebra de linha
+                        strpbrk(line, "\r\n")[0] = 0;
+                        hsize += strlen(line)+1;
+
+                        if(strstr(line, "text/plain") || strstr(line, "boundary"))
+                            break;
+
+                    }
+                    // Volta para o início do arquivo
+                    rewind(file);
+                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, hsize);
+                } else {
+                    // O tamanho é do arquivo todo
+                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, msg.file->fts_statp->st_size);
+                }
+                respond("*", resp, NULL, session);
+
+                // Pega o caminho até o arquivo
+                sprintf(filename, "%s/", msg.file->fts_path);
+                strcat(filename, msg.file->fts_name);
+
+                // Devolve o header
+                file = fopen(filename, "r");
+                if(!file) {
+                    perror(filename);
+                    exit(9);
+                }
                 while(fgets(line, MAXLINE, file) != NULL) {
-                    respond("*", line, "", session);
+                    // Remove a quebra de linha
+                    strpbrk(line, "\r\n")[0] = 0;
+                    respond(NULL, line, NULL, session);
 
-                    if(strstr(line, "text/plain") || strstr(line, "boundary"))
+                    if(header && (strstr(line, "text/plain") || strstr(line, "boundary")))
                         break;
 
                 }
 
+                respond(NULL, ")", NULL, session);
                 fclose(file);
             }
         }
     }
 
-    respond(cmdline.tag, "OK", "UID", session);
+    respond(cmdline.tag, "OK", "FETCH Completado", session);
 }
 
 
@@ -543,14 +591,14 @@ void cmd_select(cmdline_t cmdline, session_t *session) {
 
     if(session->unseen + 1 < session->exists) {
         sprintf(resp, "[UIDNEXT %d]", session->unseen+1);
-        respond("*", resp, "", session);
+        respond("*", resp, NULL, session);
     }
 
     // Finaliza
     respond(cmdline.tag, "OK", "[READ-WRITE] SELECT completado", session);
 
     session->state = SELECTED;
-    fts_close(dir);
+    // fts_close(dir);
 }
 
 void cmd_login(cmdline_t cmdline, session_t *session) {
@@ -633,7 +681,12 @@ void respond(char const *tag, char const *status, char const *message, session_t
     char resp[MAXLINE+1];
 
     // Escreve a linha de resposta pro cliente
-    sprintf(resp, "%s %s %s\r\n", tag, status, message);
+    resp[0] = 0;
+    if(tag) sprintf(resp+strlen(resp), "%s ", tag);
+    if(status) sprintf(resp+strlen(resp), "%s ", status);
+    if(message) sprintf(resp+strlen(resp), "%s ", message);
+
+    sprintf(resp+strlen(resp)-1, "\r\n");
     write(session->connfd, resp, strlen(resp));
 
     // Imprime localmente a resposta

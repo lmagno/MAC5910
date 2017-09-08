@@ -1,6 +1,6 @@
 From: email@domain
 Subject: The document you've requested
-To: user2@localdomain
+To: lmagno@ime.usp.br
 Message-ID: <21432349-f7ef-4fa0-0006-3a5e7d6885f8@localhost>
 Date: Mon, 4 Sep 2017 15:03:03 -0300
 User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:52.0) Gecko/20100101
@@ -20,11 +20,9 @@ Here is the file as an attachment.
 
 
 --------------BA0C70AAB91C694266538C09
-Content-Type: application/pdf;
- name="enunciado.pdf"
+Content-Type: application/pdf; name="enunciado.pdf"
+Content-Disposition: attachment; filename="enunciado.pdf"
 Content-Transfer-Encoding: base64
-Content-Disposition: attachment;
- filename="enunciado.pdf"
 
 JVBERi0xLjQKJcfsj6IKNSAwIG9iago8PC9MZW5ndGggNiAwIFIvRmlsdGVyIC9GbGF0ZURl
 Y29kZT4+CnN0cmVhbQp4nO1bSW9cxxEOcpxLkD9gTG4zQeap98U5WZaCKLASLwRysHOgSIpW

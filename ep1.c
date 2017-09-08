@@ -77,7 +77,7 @@ typedef struct {char tag[MAXLINE+1];    cmd_t cmd; char argv[10][MAXLINE+1]; int
 typedef struct {char tag[MAXLINE+1];  cond_t cond; char text[MAXLINE+1];} resp_t;
 
 // Mensagem armazenada
-typedef struct {FTSENT *file; bool seen, deleted; int id;} msg_t;
+typedef struct {FTSENT *file; bool seen, deleted; int id; char *header, *text; int flines, fsize, hlines, hsize; char bodystructure[MAXLINE+1], filepath[MAXLINE+1];} msg_t;
 
 // Lista de logins válidos
 char loginv[][2][MAXLINE+1] = {{"user1@localhost", "password1"},
@@ -91,12 +91,18 @@ char* uppercase(char *s);
 char* unquote(char *s);
 cmd_t findcmd(char const name[MAXLINE+1]);
 msg_t parse_title(FTSENT *file);
+void parse_msg(msg_t *msg, session_t *session);
+void parse_mime(char *line, char **structure);
+void mark_seen(msg_t *msg);
+void mark_deleted(msg_t *msg);
 
 void respond(char const *tag, char const *status, char const *message, session_t *session);
 void cmd_login(cmdline_t cmdline, session_t *session);
 void cmd_select(cmdline_t cmdline, session_t *session);
 void cmd_list(cmdline_t cmdline, session_t *session);
+void cmd_fetch(cmdline_t cmdline, session_t *session);
 void cmd_uid(cmdline_t cmdline, session_t *session);
+void cmd_store(cmdline_t cmdline, session_t *session);
 
 int main (int argc, char **argv) {
    /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -310,36 +316,44 @@ int main (int argc, char **argv) {
                 case AUTHENTICATE:
                     respond(cmdline.tag, "NO", "SAI DAQUE", &session);
                     break;
+
                 case LOGIN:
                     cmd_login(cmdline, &session);
                     break;
+
                 case LIST:
                     // Lista as pastas
                     cmd_list(cmdline, &session);
                     break;
+
                 case LSUB:
                     respond("*", "LSUB", "() \"\" INBOX", &session);
                     respond(cmdline.tag, "OK", "LSUB completado.", &session);
                     break;
+
                 case SELECT:
                     // Seleciona diretório
                     cmd_select(cmdline, &session);
                     break;
+
                 case UID:
                     cmd_uid(cmdline, &session);
                     break;
+
                 case LOGOUT:
                     // Faz o logout
                     respond("*", "BYE", "LOGOUT", &session);
                     respond(cmdline.tag, "OK", "LOGOUT", &session);
 
                     break;
-                // case FETCH:
-                //     // Faz download das mensagens
-                //     break;
-                // case STORE:
-                //     // Altera flags de uma mensagem (ex: deletar)
-                //     break;
+                case FETCH:
+                    cmd_fetch(cmdline, &session);
+                    break;
+
+                case STORE:
+                    cmd_store(cmdline, &session);
+                    break;
+
                 default:
                     // Comando não implementado
                     respond("BAD", commands[cmdline.cmd], "Comando não implementado.", &session);
@@ -357,6 +371,11 @@ int main (int argc, char **argv) {
          /* Após ter feito toda a troca de informação com o cliente,
           * pode finalizar o processo filho */
          printf("[Uma conexao fechada]\n");
+         int i;
+         for(i = 0; i < session.exists; i++) {
+             free(session.messages[i].text);
+             free(session.messages[i].header);
+         }
          close(session.connfd);
          exit(0);
       }
@@ -370,30 +389,45 @@ int main (int argc, char **argv) {
 }
 
 void cmd_uid(cmdline_t cmdline, session_t *session) {
-    char *token, *saveptr, *options;
+    char cmd[MAXLINE+1];
+
+    // Atualiza argumentos
+    strcpy(cmd, cmdline.argv[0]);
+    for(int i = 0; i < cmdline.argc-1; i++)
+        strcpy(cmdline.argv[i], cmdline.argv[i+1]);
+
+    cmdline.argc--;
+
+    // Só fetch e store foram implementados
+    uppercase(cmd);
+    if(!strcmp("FETCH", cmd)) {
+        cmdline.cmd = FETCH;
+        cmd_fetch(cmdline, session);
+    } else if(!strcmp("STORE", cmd)) {
+        cmdline.cmd = STORE;
+        cmd_store(cmdline, session);
+    } else {
+        respond(cmdline.tag, "BAD", "UID Comando não implementado.", session);
+    }
+}
+
+void cmd_fetch(cmdline_t cmdline, session_t *session) {
+    char *token, *saveptr, *options, *prev, *next;
     int a, b; // Range
     int i;
     bool asterisk;
-    bool flags, size, body, peek, header;
-    int hsize;
-    char tmp[MAXLINE+1], resp[MAXLINE+1], filename[MAXLINE+1], line[MAXLINE+1];
-    FILE *file;
+    bool flags, size, body, peek, header, bstruct;
+    char tmp[MAXLINE+1], resp[MAXLINE+1];
     msg_t msg;
 
     // Checa número de argumentos
-    if(cmdline.argc != 3) {
-        respond(cmdline.tag, "BAD", "UID Argumentos inválidos", session);
-        return;
-    }
-
-    // Só o fetch foi implementado
-    if(strcmp("FETCH", uppercase(cmdline.argv[0]))) {
-        respond(cmdline.tag, "BAD", "UID Comando não implementado.", session);
+    if(cmdline.argc != 2) {
+        respond(cmdline.tag, "BAD", "FETCH Argumentos inválidos", session);
         return;
     }
 
     // Range
-    char *range = cmdline.argv[1];
+    char *range = cmdline.argv[0];
     if(strchr(range, ':') == NULL) {
         // Só foi pedido uma única mensagem
         a = b = atoi(range);
@@ -410,33 +444,33 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
     }
 
     // Opções
-    options = uppercase(cmdline.argv[2]);
-     flags = (strstr(options, "FLAGS") != NULL);
-      size = (strstr(options, "RFC822.SIZE") != NULL);
-      body = (strstr(options, "BODY") != NULL);
-      peek = (strstr(options, "PEEK") != NULL);
-    header = (strstr(options, "HEADER") != NULL);
+    options = uppercase(cmdline.argv[1]);
+      flags = (strstr(options, "FLAGS") != NULL);
+       size = (strstr(options, "RFC822.SIZE") != NULL);
+       body = (strstr(options, "BODY") != NULL);
+       peek = (strstr(options, "PEEK") != NULL);
+     header = (strstr(options, "HEADER") != NULL);
+    bstruct = (strstr(options, "BODYSTRUCTURE") != NULL);
 
+    if(bstruct) {
+        respond(cmdline.tag, "BAD", "FETCH BODYSTRUCTURE não implementado.", session);
+    }
     // Só mantém o que está entre colchetes
     if(body)
         options = strchr(options, '[');
 
 
-
-
-    // Nenhum dois dois é '*'
     for(i = 0; i < session->exists; i++) {
         msg = session->messages[i];
-        tmp[0] = 0;
 
         // Filtra as mensagens com ID dentro do intervalo
         // e a última se houver um asterisco
         if((msg.id >= a && msg.id <= b) || (i == session->exists-1 && asterisk)) {
             // UID
-            sprintf(tmp+strlen(tmp), "UID %d", msg.id);
+            sprintf(tmp, "UID %d", msg.id);
 
             // Size
-            if(size) sprintf(tmp+strlen(tmp), " RFC822.SIZE %lld", (long long)msg.file->fts_statp->st_size);
+            if(size) sprintf(tmp+strlen(tmp), " RFC822.SIZE %d", msg.fsize);
 
             // Flags
             if(flags) {
@@ -452,61 +486,44 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
                 respond("*", resp, NULL, session);
             } else {
                 // Retorna o email de fato (ou só o cabeçalho)
-
-                // Pega o caminho até o arquivo
-                sprintf(filename, "%s/", msg.file->fts_path);
-                strcat(filename, msg.file->fts_name);
-
-                // Abre o arquivo
-                file = fopen(filename, "r");
-                if(!file) {
-                    perror(filename);
-                    exit(9);
-                }
-
                 if(header) {
-                    // Calcula o tamanho da mensagem a ser enviada
-                    hsize = 0;
-                    while(fgets(line, MAXLINE, file) != NULL) {
-                        // Remove a quebra de linha
-                        strpbrk(line, "\r\n")[0] = 0;
-                        hsize += strlen(line)+1;
+                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, msg.hsize);
+                    respond("*", resp, NULL, session);
+                    printf("%d S: UID %d (Enviando header...)\r\n", session->pid, msg.id);
 
-                        if(strstr(line, "text/plain") || strstr(line, "boundary"))
-                            break;
+                    // Envia o header uma linha por vez
+                    prev = msg.header;
+                    next = strchr(prev, '\n');
+                    while(next != NULL) {
+                        write(session->connfd, prev, strlen(prev)-strlen(next));
 
+                        prev = next;
+                        next = strchr(next+1, '\n');
                     }
-                    // Volta para o início do arquivo
-                    rewind(file);
-                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, hsize);
+                    write(session->connfd, prev, strlen(prev));
+                    respond(NULL, ")", NULL, session);
                 } else {
                     // O tamanho é do arquivo todo
-                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, msg.file->fts_statp->st_size);
-                }
-                respond("*", resp, NULL, session);
+                    sprintf(resp, "%d FETCH (%s BODY%s {%d}", msg.id, tmp, options, msg.fsize);
+                    respond("*", resp, NULL, session);
+                    printf("%d S: UID %d (Enviando body...)\r\n", session->pid, msg.id);
 
-                // Pega o caminho até o arquivo
-                sprintf(filename, "%s/", msg.file->fts_path);
-                strcat(filename, msg.file->fts_name);
+                    // Envia o arquivo uma linha por vez
+                    prev = msg.text;
+                    next = strchr(prev, '\n');
+                    while(next != NULL) {
+                        write(session->connfd, prev, strlen(prev)-strlen(next));
 
-                // Devolve o header
-                file = fopen(filename, "r");
-                if(!file) {
-                    perror(filename);
-                    exit(9);
-                }
-                while(fgets(line, MAXLINE, file) != NULL) {
-                    // Remove a quebra de linha
-                    strpbrk(line, "\r\n")[0] = 0;
-                    respond(NULL, line, NULL, session);
-
-                    if(header && (strstr(line, "text/plain") || strstr(line, "boundary")))
-                        break;
-
+                        prev = next;
+                        next = strchr(next+1, '\n');
+                    }
+                    write(session->connfd, prev, strlen(prev));
+                    respond(NULL, ")", NULL, session);
                 }
 
-                respond(NULL, ")", NULL, session);
-                fclose(file);
+                // Marca a mensagem como lida
+                if(!peek)
+                    mark_seen(&msg);
             }
         }
     }
@@ -514,6 +531,33 @@ void cmd_uid(cmdline_t cmdline, session_t *session) {
     respond(cmdline.tag, "OK", "FETCH Completado", session);
 }
 
+void cmd_store(cmdline_t cmdline, session_t *session) {
+    int id, i;
+    bool seen, deleted;
+    char *flags;
+    msg_t *msg;
+
+    // Checa número de argumentos
+    if(cmdline.argc != 3) {
+        respond(cmdline.tag, "BAD", "STORE Argumentos inválidos", session);
+        return;
+    }
+
+    // Encontra a mensagem especificada
+    id = atoi(cmdline.argv[0]);
+    for(i = 0; i < session->exists; i++) {
+        msg = &session->messages[i];
+        if(msg->id == id)
+            break;
+    }
+
+      flags = cmdline.argv[2];
+       seen = (strstr(flags, "\\Seen") != NULL);
+    deleted = (strstr(flags, "\\Deleted") != NULL);
+
+    if(seen)    mark_seen(msg);
+    if(deleted) mark_deleted(msg);
+}
 
 void cmd_list(cmdline_t cmdline, session_t *session) {
     char *dir = cmdline.argv[1];
@@ -529,6 +573,7 @@ void cmd_select(cmdline_t cmdline, session_t *session) {
     FTS *dir;
     FTSENT *file, *children;
     int fts_options = FTS_LOGICAL | FTS_NOCHDIR;
+    msg_t msg;
 
     // Checa argumentos
     if(cmdline.argc != 1) {
@@ -563,7 +608,9 @@ void cmd_select(cmdline_t cmdline, session_t *session) {
         while((file = fts_read(dir)) != NULL) {
             if(file->fts_info != FTS_F) continue;
 
-            session->messages[session->exists++] = parse_title(file);
+            msg = parse_title(file);
+            parse_msg(&msg, session);
+            session->messages[session->exists++] = msg;
             // fprintf(stdout, "%s\n", file->fts_path);
         }
     }
@@ -598,7 +645,7 @@ void cmd_select(cmdline_t cmdline, session_t *session) {
     respond(cmdline.tag, "OK", "[READ-WRITE] SELECT completado", session);
 
     session->state = SELECTED;
-    // fts_close(dir);
+    fts_close(dir);
 }
 
 void cmd_login(cmdline_t cmdline, session_t *session) {
@@ -721,6 +768,80 @@ char* uppercase(char *s) {
     return s;
 }
 
-void parse_msg(msg_t *msg) {
+void parse_msg(msg_t *msg, session_t *session) {
+    FILE *file;
+    char line[MAXLINE+1];
+    bool header;
+
+    // Pega o caminho até o arquivo
+    sprintf(msg->filepath, "%s/Maildir/cur/%s", session->user, msg->file->fts_name);
+
+    // Abre o arquivo
+    file = fopen(msg->filepath, "r");
+    // if(!file) {
+    //     perror(filename);
+    //     exit(9);
+    // }
+
+    // Aloca espaço para guardar o arquivo todo
+    msg->fsize = msg->file->fts_statp->st_size;
+    msg->text = (char*)malloc((msg->fsize+1)*sizeof(char));
+    msg->text[0] = 0;
+
+    // Calcula o tamanho do header e a quantidade de linhas
+    msg->flines = 0;
+    msg->hlines = 0;
+    msg->hsize = 0;
+    header = true;
+    while(fgets(line, MAXLINE, file) != NULL) {
+        strcat(msg->text, line);
+        msg->flines++;
+
+        if(header) {
+            msg->hsize += strlen(line);
+            msg->hlines++;
+        }
+
+        if(strstr(line, "text/plain") || strstr(line, "boundary"))
+            header = false;
+
+    }
+
+    // Aloca espaço para o header
+    msg->header = (char*)malloc((msg->hsize+1)*sizeof(char));
+    strncpy(msg->header, msg->text, msg->hsize);
+    msg->header[msg->hsize] = 0;
+
+    // Volta para o início do arquivo
+    fclose(file);
+}
+
+void mark_seen(msg_t *msg) {
+    char newfp[MAXLINE+1];
+
+    if(msg->seen) return;
+
+    strcpy(newfp, msg->filepath);
+    strcat(newfp, "S");
+
+    rename(msg->filepath, newfp);
+    strcpy(msg->filepath, newfp);
+    msg->seen = true;
+}
+
+void mark_deleted(msg_t *msg) {
+    char newfp[MAXLINE+1];
+
+    if(msg->deleted) return;
+
+    strcpy(newfp, msg->filepath);
+    strcat(newfp, "D");
+
+    rename(msg->filepath, newfp);
+    strcpy(msg->filepath, newfp);
+    msg->deleted = true;
+}
+
+void parse_mime(char *line, char **structure) {
 
 }

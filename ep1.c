@@ -54,11 +54,11 @@
 typedef enum {OK, NO, BAD, PREAUTH, BYE} cond_t;
 
 // Comandos válidos
-typedef enum {CAPABILITY, NOOP, LOGOUT,
+typedef enum {CAPABILITY, IDLE, NOOP, LOGOUT,
               STARTTLS, AUTHENTICATE, LOGIN,
               SELECT, EXAMINE, CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE, LIST, LSUB, STATUS, APPEND,
               CHECK, CLOSE, EXPUNGE, SEARCH, FETCH, STORE, COPY, UID} cmd_t;
-char commands[][16] = {"CAPABILITY", "NOOP", "LOGOUT",
+char commands[][16] = {"CAPABILITY", "IDLE", "NOOP", "LOGOUT",
               "STARTTLS", "AUTHENTICATE", "LOGIN",
               "SELECT", "EXAMINE", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE", "LIST", "LSUB", "STATUS", "APPEND",
               "CHECK", "CLOSE", "EXPUNGE", "SEARCH", "FETCH", "STORE", "COPY", "UID"};
@@ -85,7 +85,7 @@ char loginv[][2][MAXLINE+1] = {{"user1@localhost", "password1"},
 int loginc = 2;
 
 // Sessão
-typedef struct {int pid, connfd; char *user; state_t state; msg_t messages[10]; int exists, unseen;} session_t;
+typedef struct {int pid, connfd; char *user; state_t state; msg_t messages[10]; int exists, unseen; bool idle; char idletag[MAXLINE+1];} session_t;
 
 char* uppercase(char *s);
 char* unquote(char *s);
@@ -242,6 +242,15 @@ int main (int argc, char **argv) {
             recvline[n]=0;
 
             printf("%d C: %s", session.pid, recvline);
+
+            // Termina o IDLE
+            if(!strncmp(recvline, "DONE", 4)) {
+                session.idle = false;
+
+                respond(session.idletag, "OK", "IDLE Completed", &session);
+                continue;
+            }
+
             // Copia a linha para manter uma cópia intacta
             strcpy(input, recvline);
             c = recvline;
@@ -352,6 +361,16 @@ int main (int argc, char **argv) {
 
                 case STORE:
                     cmd_store(cmdline, &session);
+                    break;
+
+                case IDLE:
+                    session.idle = true;
+                    strcpy(session.idletag, cmdline.tag);
+                    respond("+", "idling", NULL, &session);
+                    break;
+
+                case NOOP:
+                    respond(cmdline.tag, "OK", "NOOP Completed", &session);
                     break;
 
                 default:

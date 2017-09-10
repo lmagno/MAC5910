@@ -1,6 +1,6 @@
 #### MAC5910 - Programação para Redes de Computadores
 # EP1
-*Autores*: Lucas Magno, Mateus Riva
+*Autores*: Lucas Magno, Matheus Riva
 
 Neste trabalho foi implementado um servidor básico IMAP na linguagem C, com estrutura interna no padrão Maildir e desenhado para comunicação com o cliente Thunderbird, utilizando como base o código de um servidor *echo* disponibilizado pelo docente.<sup>1</sup>
 

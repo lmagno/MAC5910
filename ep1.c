@@ -166,14 +166,6 @@ int main (int argc, char **argv) {
          /* TODO: É esta parte do código que terá que ser modificada
           * para que este servidor consiga interpretar comandos IMAP  */
 
-		// Comandos a ser implementados:
-		//    * LOGIN: login
-        //    * LIST: listar mensagens
-        //    * marcar mensagem como não lida
-        //    * FETCH: download de anexos
-        //    * apagar mensagens
-        //    * LOGOUT: logout
-
 
         char *token;
         char *saveptr;
@@ -264,7 +256,7 @@ int main (int argc, char **argv) {
             // Decide o que fazer dependendo do comando
             switch(cmdline.cmd) {
                 case AUTHENTICATE:
-                    respond(cmdline.tag, "NO", "SAI DAQUE", &session);
+                    respond(cmdline.tag, "NO", "AUTHENTICATE Comando não implementado", &session);
                     break;
 
                 case LOGIN:
@@ -318,7 +310,6 @@ int main (int argc, char **argv) {
                     break;
             }
 
-            // write(session.connfd, recvline, strlen(recvline));
         }
          /* ========================================================= */
          /* ========================================================= */
